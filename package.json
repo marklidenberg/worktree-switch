@@ -1,0 +1,25 @@
+{
+  "name": "worktree-switch",
+  "displayName": "Worktree Switch",
+  "description": "Switch branches as worktree windows: branch = worktree = window.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": { "vscode": "^1.60.0" },
+  "categories": ["SCM Providers", "Other"],
+  "main": "./extension.js",
+  "activationEvents": ["onCommand:worktreeSwitch.switch"],
+  "contributes": {
+    "commands": [
+      {
+        "command": "worktreeSwitch.switch",
+        "title": "Worktree: Switch Branch"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "worktreeSwitch.switch",
+        "key": "cmd+alt+w"
+      }
+    ]
+  }
+}
