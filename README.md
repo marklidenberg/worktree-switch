@@ -31,3 +31,4 @@ Variables passed to the script:
 ## Todo 
 
 - Rename "Switch to" to something better, since we now open a new window each time
+- Add settings
