@@ -28,3 +28,6 @@ Variables passed to the script:
 - `$WORKTREE_MAIN` — original repo root
 - `$WORKTREE_BRANCH` — branch name
 
+## Todo 
+
+- Rename "Switch to" to something better, since we now open a new window each time
