@@ -19,31 +19,185 @@ function refExists(ref, cwd) {
   }
 }
 
-// - Searchable branch picker. Typing a name that no branch matches surfaces a
-//   "Create branch …" item. Resolves to the chosen branch name, or undefined.
+// - Per-repo setup for a freshly created worktree. If the main repo has a
+//   setup-worktree.sh (looked up in the repo root, then dev/, then scripts/), run
+//   it inside the new worktree (e.g. to `yarn install`, set up husky, sync a venv,
+//   link skills-tree). Output streams live to the "Worktree Switch" output channel
+//   under a progress notification; the branch name and paths are passed via argv
+//   ($1) and env. A non-zero exit is surfaced but doesn't block opening the worktree.
 
-function pickBranch(names, def) {
+let outputChannel;
+function getOutput() {
+  if (!outputChannel) outputChannel = vscode.window.createOutputChannel('Worktree Switch');
+  return outputChannel;
+}
+
+// - Locate setup-worktree.sh in the repo's common script locations, or null.
+function findSetupScript(root) {
+  const candidates = ['setup-worktree.sh', 'dev/setup-worktree.sh', 'scripts/setup-worktree.sh', 'tools/setup-worktree.sh', 'contrib/setup-worktree.sh'];
+  return candidates.map((rel) => path.join(root, rel)).find((p) => fs.existsSync(p)) || null;
+}
+
+function runSetupWorktree(root, target, branch) {
+  const script = findSetupScript(root);
+  if (!script) return Promise.resolve();
+
+  const out = getOutput();
+  out.clear();
+  out.show(true);
+  out.appendLine(`Preparing worktree "${branch}" — running ${path.relative(root, script)}`);
+  out.appendLine('—'.repeat(60));
+
+  return vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: `Preparing worktree "${branch}"…`, cancellable: false },
+    () => new Promise((resolve) => {
+      const child = cp.spawn('bash', [script, target], {
+        cwd: target,
+        env: { ...process.env, WORKTREE_MAIN: root, WORKTREE_PATH: target, WORKTREE_BRANCH: branch },
+      });
+      child.stdout.on('data', (d) => out.append(d.toString()));
+      child.stderr.on('data', (d) => out.append(d.toString()));
+      child.on('error', (e) => {
+        out.appendLine(`\n[error] ${e.message}`);
+        vscode.window.showErrorMessage(`setup-worktree.sh could not run: ${e.message}`);
+        resolve();
+      });
+      child.on('close', (code) => {
+        out.appendLine(`\n${'—'.repeat(60)}`);
+        if (code === 0) {
+          out.appendLine(`Worktree "${branch}" ready.`);
+        } else {
+          out.appendLine(`setup-worktree.sh exited with code ${code}.`);
+          vscode.window.showErrorMessage(`Worktree setup failed (exit ${code}). See "Worktree Switch" output.`);
+        }
+        resolve();
+      });
+    }),
+  );
+}
+
+// - Validate a new branch name against git's ref-name rules (git-check-ref-format).
+//   Returns a human-readable reason if invalid, or null if the name is allowed.
+
+function validateBranchName(name) {
+  if (!name) return 'Branch name cannot be empty';
+  if (name.startsWith('-')) return 'Branch name cannot start with "-"';
+  if (name === '@') return 'Branch name cannot be "@"';
+  if (name.startsWith('/') || name.endsWith('/')) return 'Branch name cannot start or end with "/"';
+  if (name.endsWith('.')) return 'Branch name cannot end with "."';
+  if (name.includes('//')) return 'Branch name cannot contain "//"';
+  if (name.includes('..')) return 'Branch name cannot contain ".."';
+  if (name.includes('@{')) return 'Branch name cannot contain "@{"';
+  if (/[ \t~^:?*\[\\\x00-\x1F\x7F]/.test(name)) return 'Branch name cannot contain spaces or any of: ~ ^ : ? * [ \\';
+  for (const part of name.split('/')) {
+    if (part.startsWith('.')) return 'No part of a branch name can start with "."';
+    if (part.endsWith('.lock')) return 'No part of a branch name can end with ".lock"';
+  }
+  return null;
+}
+
+// - A branch name (which may contain "/", "@", etc.) becomes a single worktree
+//   directory name. encodeFilename percent-encodes it into a safe, reversible,
+//   mostly-readable name; decodeFilename inverts it. Beyond plain percent-encoding
+//   we also guard Windows reserved device names (CON, COM1, …) and trailing dots,
+//   so the same name is safe on macOS, Linux, and Windows.
+
+const RESERVED_NAMES = new Set([
+  'CON', 'PRN', 'AUX', 'NUL',
+  ...Array.from({ length: 9 }, (_, i) => `COM${i + 1}`),
+  ...Array.from({ length: 9 }, (_, i) => `LPT${i + 1}`),
+]);
+
+// - Percent-encode like Python's urllib.parse.quote(safe=''): keep A-Za-z0-9 and
+//   _.-~ readable, encode everything else. encodeURIComponent leaves !*'() alone,
+//   so encode those too.
+function percentEncode(s) {
+  return encodeURIComponent(s).replace(/[!*'()]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+}
+
+function encodeFilename(name) {
+  if (name === '') return '%2E%2E%2E'; // sentinel for empty; no real input maps here
+  let enc = percentEncode(name);
+  const stem = enc.split('.', 1)[0];
+  if (RESERVED_NAMES.has(stem.toUpperCase()) || enc === '.' || enc === '..') {
+    // CON, CON.txt, '.', '..' -> escape the first char so the name is inert
+    enc = '%' + enc.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0') + enc.slice(1);
+  }
+  if (enc.endsWith('.')) enc = enc.slice(0, -1) + '%2E'; // Windows strips trailing dots
+  return enc;
+}
+
+function decodeFilename(name) {
+  if (name === '%2E%2E%2E') return '';
+  return decodeURIComponent(name);
+}
+
+// - The one picker. `buildModels()` returns the current branch rows (re-queryable
+//   so the list can refresh after a delete); each row gets a trash button that
+//   invokes `onDelete(model)` in place. Typing an unknown name surfaces a
+//   "Create branch …" item, or a red error row for an invalid name (Enter ignored).
+//   Resolves to the chosen branch name, or undefined.
+
+function pickBranch(def, buildModels, onDelete) {
   return new Promise((resolve) => {
-    const base = names.map((n) => ({ label: n, branch: n }));
     const qp = vscode.window.createQuickPick();
     qp.title = 'Worktree: Switch Branch';
-    qp.placeholder = 'Switch to a branch — or type a new name to create it';
-    qp.items = base;
-    qp.onDidChangeValue((value) => {
-      const v = value.trim();
-      qp.items = v && !names.includes(v)
-        ? [{ label: `$(plus) Create branch "${v}"`, description: `from ${def}`, branch: v }, ...base]
-        : base;
-    });
+    qp.placeholder = 'Switch to a branch, type a new name to create it, or click the trash icon to delete';
+
+    let base = [];
+    const render = () => {
+      const v = qp.value.trim();
+      if (!v || base.some((b) => b.branch === v)) {
+        qp.title = 'Worktree: Switch Branch';
+        qp.items = base;
+        return;
+      }
+      const err = validateBranchName(v);
+      if (err) {
+        // - Make the invalid state unmistakable: surface the reason in the title,
+        //   show only a red error row (alwaysShow so the filter can't hide it), and
+        //   block Enter below.
+        qp.title = `$(error) Invalid branch name — ${err}`;
+        qp.items = [{ label: `$(error) "${v}" can't be used as a branch name`, description: err, alwaysShow: true, invalid: true }];
+      } else {
+        qp.title = 'Worktree: Switch Branch';
+        qp.items = [{ label: `$(plus) Create branch "${v}"`, description: `from ${def}`, alwaysShow: true, branch: v }, ...base];
+      }
+    };
+    const reload = () => {
+      base = buildModels().map((m) => {
+        const it = { label: m.branch, branch: m.branch, model: m };
+        if (m.current) it.description = '$(check) current';
+        else if (m.worktreePath) it.description = '$(folder) worktree';
+        // - Trash button on every branch except the default (the main repo isn't deletable).
+        if (m.branch !== def) it.buttons = [{ iconPath: new vscode.ThemeIcon('trash'), tooltip: 'Delete worktree & branch' }];
+        return it;
+      });
+      render();
+    };
+
+    qp.onDidChangeValue(render);
     qp.onDidAccept(() => {
       const sel = qp.selectedItems[0];
+      if (sel && sel.invalid) return; // keep the picker open; the error item explains why
       resolve(sel ? sel.branch : undefined);
       qp.hide();
+    });
+    qp.onDidTriggerItemButton(async (e) => {
+      const model = e.item && e.item.model;
+      if (!model) return;
+      qp.busy = true;
+      const result = await onDelete(model);
+      qp.busy = false;
+      if (result === 'window-closed') { resolve(undefined); qp.hide(); return; }
+      reload(); // refresh the list in place
     });
     qp.onDidHide(() => {
       resolve(undefined);
       qp.dispose();
     });
+
+    reload();
     qp.show();
   });
 }
@@ -75,17 +229,58 @@ async function switchBranch() {
     def = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], root).replace(/^origin\//, '');
   } catch {}
 
-  // - Collect branch names (local + remote, deduped, default first)
+  const open = path.resolve(cwd);
 
-  const raw = git(['for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes'], root).split('\n');
-  const names = new Set();
-  for (let n of raw) {
-    if (!n || n === 'origin' || n.endsWith('/HEAD')) continue;
-    names.add(n.replace(/^origin\//, ''));
-  }
-  const items = [def, ...[...names].filter((n) => n !== def).sort()];
+  // - Branch rows for the picker (local + remote, deduped, default first), each
+  //   annotated with its worktree path (if any) and whether it's the open window.
 
-  const picked = await pickBranch(items, def);
+  const buildModels = () => {
+    const raw = git(['for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes'], root).split('\n');
+    const names = new Set();
+    for (let n of raw) {
+      if (!n || n === 'origin' || n.endsWith('/HEAD')) continue;
+      names.add(n.replace(/^origin\//, ''));
+    }
+    const ordered = [def, ...[...names].filter((n) => n !== def).sort()];
+    const wtByBranch = new Map();
+    for (const e of listWorktrees(root)) if (e.branch) wtByBranch.set(e.branch, e.path);
+    return ordered.map((b) => {
+      const worktreePath = wtByBranch.get(b);
+      return { branch: b, worktreePath, current: worktreePath ? path.resolve(worktreePath) === open : false };
+    });
+  };
+
+  // - Trash-button handler: remove the branch's worktree (if any) and force-delete
+  //   its local branch. Returns 'window-closed' if it deleted the open worktree.
+
+  const onDelete = async (model) => {
+    const branch = model.branch;
+    const wt = listWorktrees(root).find((e) => e.branch === branch && path.resolve(e.path) !== path.resolve(root));
+    const failures = [];
+    let deletedCurrent = false;
+    try {
+      if (wt) {
+        git(['worktree', 'remove', '--force', wt.path], root, true);
+        if (path.resolve(wt.path) === open) deletedCurrent = true;
+      }
+      if (branch !== def && refExists(`refs/heads/${branch}`, root)) {
+        try { git(['branch', '-D', branch], root, true); } catch (e) {
+          failures.push(`branch ${branch}: ${e && e.message ? e.message.trim() : String(e)}`);
+        }
+      }
+    } catch (e) {
+      failures.push(`${branch}: ${e && e.message ? e.message.trim() : String(e)}`);
+    }
+    try { git(['worktree', 'prune'], root, true); } catch {}
+    if (failures.length) vscode.window.showErrorMessage(`Worktree: delete failed — ${failures.join('; ')}`);
+    if (deletedCurrent) {
+      await vscode.commands.executeCommand('workbench.action.closeWindow');
+      return 'window-closed';
+    }
+    return undefined;
+  };
+
+  const picked = await pickBranch(def, buildModels, onDelete);
   if (!picked) return;
 
   // - Default branch -> open the main repo folder
@@ -104,8 +299,14 @@ async function switchBranch() {
 
   // - Create the worktree if missing (hooks disabled to avoid the repo's yarnhook failure)
 
-  const target = path.join(wtDir, picked);
-  if (!fs.existsSync(target)) {
+  // - Prefix the worktree folder with the repo name (`<repo>__<branch>`) so its
+  //   window title is distinguishable from same-named branches in other repos.
+  //   The git branch itself stays unprefixed.
+
+  const repoName = path.basename(root);
+  const target = path.join(wtDir, `${repoName}__${encodeFilename(picked)}`);
+  const created = !fs.existsSync(target);
+  if (created) {
     // - If the picked branch is checked out in the main repo, it can't also be a
     //   worktree. Offer to free it by switching the main repo to the default branch.
 
@@ -136,7 +337,7 @@ async function switchBranch() {
       } else {
         let base = `origin/${def}`;
         if (!refExists(`refs/remotes/${base}`, root)) base = def;
-        git(['worktree', 'add', '-b', picked, target, base], root, true);
+        git(['worktree', 'add', '--no-track', '-b', picked, target, base], root, true);
       }
     } catch (e) {
       if (!fs.existsSync(target)) {
@@ -146,9 +347,30 @@ async function switchBranch() {
     }
   }
 
-  // - Open the worktree
+  // - Run the repo's setup-worktree.sh for a freshly created worktree (this is
+  //   where per-repo setup like skills-tree linking, installs, etc. happens)
 
-  await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(target), { forceNewWindow: false });
+  if (created) await runSetupWorktree(root, target, picked);
+
+  // - Open the worktree. A freshly created worktree opens in a NEW window (so the
+  //   current one stays put); switching to an existing worktree reuses this window.
+
+  await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(target), { forceNewWindow: created });
+}
+
+// - Parse `git worktree list --porcelain` into { path, branch?, bare?, detached? }.
+
+function listWorktrees(root) {
+  const out = git(['worktree', 'list', '--porcelain'], root);
+  const entries = [];
+  let cur = null;
+  for (const line of out.split('\n')) {
+    if (line.startsWith('worktree ')) { cur = { path: line.slice('worktree '.length) }; entries.push(cur); }
+    else if (cur && line.startsWith('branch ')) cur.branch = line.slice('branch '.length).replace(/^refs\/heads\//, '');
+    else if (cur && line === 'bare') cur.bare = true;
+    else if (cur && line === 'detached') cur.detached = true;
+  }
+  return entries;
 }
 
 function activate(context) {
