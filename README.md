@@ -1,26 +1,26 @@
 # worktree-switch
 
-VS Code extension: branch = worktree = window. Each branch lives in its own Git worktree and opens in a dedicated VS Code window.
+VSCode extension: branch = worktree = window. A Git worktree is a separate checkout of the repo in its own folder, so every branch gets its own window.
 
 ## Install
 
-From the repo root:
+Not on the Marketplace — clone into your extensions folder:
 
 ```
-cp -r . ~/.vscode/extensions/worktree-switch
+git clone https://github.com/marklidenberg/worktree-switch.git ~/.vscode/extensions/worktree-switch
 ```
 
-Reload VS Code.
+Reload VSCode.
 
 ## Use
 
-`cmd+shift+o` — pick a branch (or type a new name to create one). The default branch opens the original repo directory; any other branch opens in its own worktree — new window on first open, same window on return. 
+Run **Worktree: Switch Branch** (`cmd+shift+o`) — pick a branch, or type a new name to create one.
 
-## Per-repo setup: `worktreeSwitch.setup`
+The default branch (usually `main`) opens the repo itself. Any other branch opens in its own worktree.
 
-When a worktree is first created, the extension runs the command in the `worktreeSwitch.setup` setting inside the new worktree before opening it. Leave it empty (the default) to skip setup.
+## Setup per worktree
 
-Set it in the repo's `.vscode/settings.json` so it's shared with everyone working on the repo:
+Point `worktreeSwitch.setup` at a command that runs in each new worktree before its window opens. Put it in the repo's `.vscode/settings.json` to share it with everyone:
 
 ```jsonc
 {
@@ -28,10 +28,10 @@ Set it in the repo's `.vscode/settings.json` so it's shared with everyone workin
 }
 ```
 
-Use it for per-branch setup (`yarn install`, `uv sync`, etc.) rather than symlinking `node_modules`/`.venv`, which go stale when dependencies differ across branches.
-
-The command runs in the platform's default shell, with the new worktree as the working directory. A non-zero exit is surfaced but doesn't block opening the worktree. Environment variables passed to it:
+Empty by default. It runs in your shell with these variables set:
 
 - `$WORKTREE_PATH` — worktree path
 - `$WORKTREE_MAIN` — original repo root
 - `$WORKTREE_BRANCH` — branch name
+
+If it fails, you'll see the error and the window still opens.
