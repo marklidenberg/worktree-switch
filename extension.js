@@ -24,8 +24,9 @@ function refExists(ref, cwd) {
 //   chained with `&&`); when set, it runs inside the new worktree to do per-repo
 //   prep (installs, husky, venv sync, link skills-tree). Output streams live to the
 //   "Worktree Switch" output channel under a progress notification; the worktree
-//   path and branch are passed via WORKTREE_* env vars. A non-zero exit is surfaced
-//   but doesn't block opening the worktree. Empty/unset means setup is skipped.
+//   path and branch are passed via WORKTREE_* env vars. Resolves to true on success
+//   (or when no setup is configured) and false on failure; a failure surfaces an
+//   error and the caller leaves the worktree unopened. Empty/unset skips setup.
 
 let outputChannel;
 function getOutput() {
@@ -35,7 +36,7 @@ function getOutput() {
 
 function runSetupWorktree(root, target, branch) {
   const setup = (vscode.workspace.getConfiguration('worktreeSwitch', vscode.Uri.file(target)).get('setup') || '').trim();
-  if (!setup) return Promise.resolve();
+  if (!setup) return Promise.resolve(true);
 
   const out = getOutput();
   out.clear();
@@ -56,17 +57,18 @@ function runSetupWorktree(root, target, branch) {
       child.on('error', (e) => {
         out.appendLine(`\n[error] ${e.message}`);
         vscode.window.showErrorMessage(`Worktree setup could not run: ${e.message}`);
-        resolve();
+        resolve(false);
       });
       child.on('close', (code) => {
         out.appendLine(`\n${'—'.repeat(60)}`);
         if (code === 0) {
           out.appendLine(`Worktree "${branch}" ready.`);
+          resolve(true);
         } else {
           out.appendLine(`Worktree setup exited with code ${code}.`);
           vscode.window.showErrorMessage(`Worktree setup failed (exit ${code}). See "Worktree Switch" output.`);
+          resolve(false);
         }
-        resolve();
       });
     }),
   );
@@ -346,7 +348,10 @@ async function switchBranch() {
   // - Run the configured `worktreeSwitch.setup` command for a freshly created
   //   worktree (per-repo setup like skills-tree linking, installs, etc.)
 
-  if (created) await runSetupWorktree(root, target, picked);
+  // - If setup fails, leave the worktree unopened so the failure is unmistakable
+  //   (the error is already surfaced). The worktree still exists; the next switch
+  //   to this branch reuses it and opens without re-running setup.
+  if (created && !(await runSetupWorktree(root, target, picked))) return;
 
   // - Open the worktree. A freshly created worktree opens in a NEW window (so the
   //   current one stays put); switching to an existing worktree reuses this window.
