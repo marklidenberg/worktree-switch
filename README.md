@@ -1,6 +1,6 @@
 # worktree-switch
 
-VSCode extension: branch = worktree = window. A Git worktree is a separate checkout of the repo in its own folder, so every branch gets its own window.
+A simple VSCode extension that opens each Git worktree in its own window, and runs a setup command when a worktree is first created.
 
 ## Install
 
@@ -34,4 +34,4 @@ Empty by default. It runs in your shell with these variables set:
 - `$WORKTREE_MAIN` — original repo root
 - `$WORKTREE_BRANCH` — branch name
 
-If it fails, you'll see the error and the window still opens.
+If it fails, you'll see the error and the window won't open.
