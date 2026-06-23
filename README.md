@@ -16,15 +16,23 @@ Reload VS Code.
 
 `cmd+shift+o` — pick a branch (or type a new name to create one). The default branch opens the original repo directory; any other branch opens in its own worktree — new window on first open, same window on return. 
 
-## Per-repo setup: `setup-worktree.sh`
+## Per-repo setup: `worktreeSwitch.setup`
 
-When a worktree is first created, the extension looks for `setup-worktree.sh` in the original repo (the cloned directory, not the worktree), in order: root → `dev/` → `scripts/` → `tools/` → `contrib/`. If found, runs it inside the new worktree before opening. Output streams to the "Worktree Switch" output channel.
+When a worktree is first created, the extension runs the command in the `worktreeSwitch.setup` setting inside the new worktree before opening it. Leave it empty (the default) to skip setup.
+
+Set it in the repo's `.vscode/settings.json` so it's shared with everyone working on the repo:
+
+```jsonc
+{
+  "worktreeSwitch.setup": "yarn install && bash dev/setup.sh"
+}
+```
 
 Use it for per-branch setup (`yarn install`, `uv sync`, etc.) rather than symlinking `node_modules`/`.venv`, which go stale when dependencies differ across branches.
 
-Variables passed to the script:
+The command runs in the platform's default shell, with the new worktree as the working directory. A non-zero exit is surfaced but doesn't block opening the worktree. Environment variables passed to it:
 
-- `$1` / `$WORKTREE_PATH` — worktree path (positional arg and env var, same value)
+- `$WORKTREE_PATH` — worktree path
 - `$WORKTREE_MAIN` — original repo root
 - `$WORKTREE_BRANCH` — branch name
 

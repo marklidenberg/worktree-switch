@@ -19,12 +19,13 @@ function refExists(ref, cwd) {
   }
 }
 
-// - Per-repo setup for a freshly created worktree. If the main repo has a
-//   setup-worktree.sh (looked up in the repo root, then dev/, then scripts/), run
-//   it inside the new worktree (e.g. to `yarn install`, set up husky, sync a venv,
-//   link skills-tree). Output streams live to the "Worktree Switch" output channel
-//   under a progress notification; the branch name and paths are passed via argv
-//   ($1) and env. A non-zero exit is surfaced but doesn't block opening the worktree.
+// - Per-repo setup for a freshly created worktree. The `worktreeSwitch.setup`
+//   setting holds a shell command (e.g. `yarn install`, or `bash dev/setup.sh`,
+//   chained with `&&`); when set, it runs inside the new worktree to do per-repo
+//   prep (installs, husky, venv sync, link skills-tree). Output streams live to the
+//   "Worktree Switch" output channel under a progress notification; the worktree
+//   path and branch are passed via WORKTREE_* env vars. A non-zero exit is surfaced
+//   but doesn't block opening the worktree. Empty/unset means setup is skipped.
 
 let outputChannel;
 function getOutput() {
@@ -32,34 +33,29 @@ function getOutput() {
   return outputChannel;
 }
 
-// - Locate setup-worktree.sh in the repo's common script locations, or null.
-function findSetupScript(root) {
-  const candidates = ['setup-worktree.sh', 'dev/setup-worktree.sh', 'scripts/setup-worktree.sh', 'tools/setup-worktree.sh', 'contrib/setup-worktree.sh'];
-  return candidates.map((rel) => path.join(root, rel)).find((p) => fs.existsSync(p)) || null;
-}
-
 function runSetupWorktree(root, target, branch) {
-  const script = findSetupScript(root);
-  if (!script) return Promise.resolve();
+  const setup = (vscode.workspace.getConfiguration('worktreeSwitch', vscode.Uri.file(target)).get('setup') || '').trim();
+  if (!setup) return Promise.resolve();
 
   const out = getOutput();
   out.clear();
   out.show(true);
-  out.appendLine(`Preparing worktree "${branch}" — running ${path.relative(root, script)}`);
+  out.appendLine(`Preparing worktree "${branch}" — running: ${setup}`);
   out.appendLine('—'.repeat(60));
 
   return vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: `Preparing worktree "${branch}"…`, cancellable: false },
     () => new Promise((resolve) => {
-      const child = cp.spawn('bash', [script, target], {
+      const child = cp.spawn(setup, {
         cwd: target,
+        shell: true,
         env: { ...process.env, WORKTREE_MAIN: root, WORKTREE_PATH: target, WORKTREE_BRANCH: branch },
       });
       child.stdout.on('data', (d) => out.append(d.toString()));
       child.stderr.on('data', (d) => out.append(d.toString()));
       child.on('error', (e) => {
         out.appendLine(`\n[error] ${e.message}`);
-        vscode.window.showErrorMessage(`setup-worktree.sh could not run: ${e.message}`);
+        vscode.window.showErrorMessage(`Worktree setup could not run: ${e.message}`);
         resolve();
       });
       child.on('close', (code) => {
@@ -67,7 +63,7 @@ function runSetupWorktree(root, target, branch) {
         if (code === 0) {
           out.appendLine(`Worktree "${branch}" ready.`);
         } else {
-          out.appendLine(`setup-worktree.sh exited with code ${code}.`);
+          out.appendLine(`Worktree setup exited with code ${code}.`);
           vscode.window.showErrorMessage(`Worktree setup failed (exit ${code}). See "Worktree Switch" output.`);
         }
         resolve();
@@ -347,8 +343,8 @@ async function switchBranch() {
     }
   }
 
-  // - Run the repo's setup-worktree.sh for a freshly created worktree (this is
-  //   where per-repo setup like skills-tree linking, installs, etc. happens)
+  // - Run the configured `worktreeSwitch.setup` command for a freshly created
+  //   worktree (per-repo setup like skills-tree linking, installs, etc.)
 
   if (created) await runSetupWorktree(root, target, picked);
 

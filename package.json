@@ -20,6 +20,17 @@
         "command": "worktreeSwitch.switch",
         "key": "cmd+shift+o"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Worktree Switch",
+      "properties": {
+        "worktreeSwitch.setup": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "markdownDescription": "Shell command run inside a freshly created worktree (e.g. `yarn install` or `bash dev/setup.sh`). Chain steps with `&&`. Runs in the platform's default shell with the worktree as the working directory, and with `WORKTREE_MAIN`, `WORKTREE_PATH`, and `WORKTREE_BRANCH` set in the environment. Leave empty to skip setup. Set this in workspace settings (`.vscode/settings.json`) so it's shared with the repo."
+        }
+      }
+    }
   }
 }
