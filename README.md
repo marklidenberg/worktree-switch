@@ -35,8 +35,3 @@ The command runs in the platform's default shell, with the new worktree as the w
 - `$WORKTREE_PATH` — worktree path
 - `$WORKTREE_MAIN` — original repo root
 - `$WORKTREE_BRANCH` — branch name
-
-## Todo 
-
-- Rename "Switch to" to something better, since we now open a new window each time
-- Add settings
