@@ -7,12 +7,16 @@
   "engines": { "vscode": "^1.60.0" },
   "categories": ["SCM Providers", "Other"],
   "main": "./extension.js",
-  "activationEvents": ["onCommand:worktreeSwitch.switch"],
+  "activationEvents": ["onCommand:worktreeSwitch.switch", "onCommand:worktreeSwitch.remove"],
   "contributes": {
     "commands": [
       {
         "command": "worktreeSwitch.switch",
         "title": "Worktree: Switch Branch"
+      },
+      {
+        "command": "worktreeSwitch.remove",
+        "title": "Worktree: Remove"
       }
     ],
     "keybindings": [

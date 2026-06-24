@@ -19,14 +19,65 @@ function refExists(ref, cwd) {
   }
 }
 
+// - Locate the repo from the active window: its main worktree root, the default
+//   branch (origin/HEAD, falling back to main), and the resolved path of the open
+//   folder. Surfaces an error and returns null when there's no git repo open.
+
+function resolveRepo() {
+  const folders = vscode.workspace.workspaceFolders;
+  if (!folders || !folders.length) {
+    vscode.window.showErrorMessage('Worktree: no folder is open');
+    return null;
+  }
+  const editor = vscode.window.activeTextEditor;
+  const cwd = (editor && vscode.workspace.getWorkspaceFolder(editor.document.uri)?.uri.fsPath) || folders[0].uri.fsPath;
+
+  let root;
+  try {
+    const first = git(['worktree', 'list', '--porcelain'], cwd).split('\n').find((l) => l.startsWith('worktree '));
+    root = first.slice('worktree '.length);
+  } catch {
+    vscode.window.showErrorMessage('Worktree: not a git repository');
+    return null;
+  }
+
+  let def = 'main';
+  try {
+    def = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], root).replace(/^origin\//, '');
+  } catch {}
+
+  return { root, def, open: path.resolve(cwd) };
+}
+
+// - Remove the worktree at `wtPath` (if any) and force-delete `branch` (unless it's
+//   the default branch or absent). `--force` discards uncommitted changes. Returns
+//   the list of failure strings (empty on success).
+
+function removeWorktreeAndBranch(root, def, wtPath, branch) {
+  const msg = (e) => (e && e.message ? e.message.trim() : String(e));
+  const failures = [];
+  try {
+    if (wtPath) git(['worktree', 'remove', '--force', wtPath], root, true);
+    if (branch && branch !== def && refExists(`refs/heads/${branch}`, root)) {
+      try { git(['branch', '-D', branch], root, true); } catch (e) {
+        failures.push(`branch ${branch}: ${msg(e)}`);
+      }
+    }
+  } catch (e) {
+    failures.push(`${branch || wtPath}: ${msg(e)}`);
+  }
+  try { git(['worktree', 'prune'], root, true); } catch {}
+  return failures;
+}
+
 // - Per-repo setup for a freshly created worktree. The `worktreeSwitch.setupWorktreeCommand`
 //   setting holds a shell command (e.g. `yarn install`, or `bash dev/setup.sh`,
 //   chained with `&&`); when set, it runs inside the new worktree to do per-repo
 //   prep (installs, husky, venv sync, link skills-tree). Output streams live to the
-//   "Worktree Switch" output channel under a progress notification; the worktree
-//   path and branch are passed via WORKTREE_* env vars. Resolves to true on success
-//   (or when no setup is configured) and false on failure; a failure surfaces an
-//   error and the caller leaves the worktree unopened. Empty/unset skips setup.
+//   "Worktree Switch" output channel under a cancellable progress notification; the
+//   worktree path and branch are passed via WORKTREE_* env vars. Resolves to 'ok' on
+//   success (or when no setup is configured), 'failed' on error/non-zero exit, or
+//   'cancelled' if the user clicks Cancel. Empty/unset skips setup.
 
 let outputChannel;
 function getOutput() {
@@ -36,7 +87,7 @@ function getOutput() {
 
 function runSetupWorktree(root, target, branch) {
   const setup = (vscode.workspace.getConfiguration('worktreeSwitch', vscode.Uri.file(target)).get('setupWorktreeCommand') || '').trim();
-  if (!setup) return Promise.resolve(true);
+  if (!setup) return Promise.resolve('ok');
 
   const out = getOutput();
   out.clear();
@@ -45,29 +96,45 @@ function runSetupWorktree(root, target, branch) {
   out.appendLine('—'.repeat(60));
 
   return vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: `Preparing worktree "${branch}"…`, cancellable: false },
-    () => new Promise((resolve) => {
+    { location: vscode.ProgressLocation.Notification, title: `Preparing worktree "${branch}"…`, cancellable: true },
+    (_progress, token) => new Promise((resolve) => {
+      // - `detached` puts the command in its own process group so cancelling can
+      //   kill the whole tree (the shell *and* its children, e.g. yarn), not just
+      //   the top-level shell.
       const child = cp.spawn(setup, {
         cwd: target,
         shell: true,
+        detached: true,
         env: { ...process.env, WORKTREE_MAIN: root, WORKTREE_PATH: target, WORKTREE_BRANCH: branch },
+      });
+      let cancelled = false;
+      const sub = token.onCancellationRequested(() => {
+        cancelled = true;
+        out.appendLine('\n[cancelled] stopping setup…');
+        try { process.kill(-child.pid, 'SIGTERM'); } catch { try { child.kill('SIGTERM'); } catch {} }
       });
       child.stdout.on('data', (d) => out.append(d.toString()));
       child.stderr.on('data', (d) => out.append(d.toString()));
       child.on('error', (e) => {
+        sub.dispose();
         out.appendLine(`\n[error] ${e.message}`);
         vscode.window.showErrorMessage(`Worktree setup could not run: ${e.message}`);
-        resolve(false);
+        resolve('failed');
       });
       child.on('close', (code) => {
+        sub.dispose();
         out.appendLine(`\n${'—'.repeat(60)}`);
-        if (code === 0) {
+        if (cancelled) {
+          out.appendLine(`Worktree "${branch}" setup cancelled.`);
+          vscode.window.showInformationMessage(`Worktree setup cancelled for "${branch}".`);
+          resolve('cancelled');
+        } else if (code === 0) {
           out.appendLine(`Worktree "${branch}" ready.`);
-          resolve(true);
+          resolve('ok');
         } else {
           out.appendLine(`Worktree setup exited with code ${code}.`);
           vscode.window.showErrorMessage(`Worktree setup failed (exit ${code}). See "Worktree Switch" output.`);
-          resolve(false);
+          resolve('failed');
         }
       });
     }),
@@ -201,33 +268,9 @@ function pickBranch(def, buildModels, onDelete) {
 }
 
 async function switchBranch() {
-  // - Find the repo and its main worktree root
-
-  const folders = vscode.workspace.workspaceFolders;
-  if (!folders || !folders.length) {
-    vscode.window.showErrorMessage('Worktree: no folder is open');
-    return;
-  }
-  const editor = vscode.window.activeTextEditor;
-  const cwd = (editor && vscode.workspace.getWorkspaceFolder(editor.document.uri)?.uri.fsPath) || folders[0].uri.fsPath;
-
-  let root;
-  try {
-    const first = git(['worktree', 'list', '--porcelain'], cwd).split('\n').find((l) => l.startsWith('worktree '));
-    root = first.slice('worktree '.length);
-  } catch (e) {
-    vscode.window.showErrorMessage('Worktree: not a git repository');
-    return;
-  }
-
-  // - Resolve the default branch (origin/HEAD, falling back to main)
-
-  let def = 'main';
-  try {
-    def = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], root).replace(/^origin\//, '');
-  } catch {}
-
-  const open = path.resolve(cwd);
+  const repo = resolveRepo();
+  if (!repo) return;
+  const { root, def, open } = repo;
 
   // - Branch rows for the picker (local + remote, deduped, default first), each
   //   annotated with its worktree path (if any) and whether it's the open window.
@@ -254,24 +297,9 @@ async function switchBranch() {
   const onDelete = async (model) => {
     const branch = model.branch;
     const wt = listWorktrees(root).find((e) => e.branch === branch && path.resolve(e.path) !== path.resolve(root));
-    const failures = [];
-    let deletedCurrent = false;
-    try {
-      if (wt) {
-        git(['worktree', 'remove', '--force', wt.path], root, true);
-        if (path.resolve(wt.path) === open) deletedCurrent = true;
-      }
-      if (branch !== def && refExists(`refs/heads/${branch}`, root)) {
-        try { git(['branch', '-D', branch], root, true); } catch (e) {
-          failures.push(`branch ${branch}: ${e && e.message ? e.message.trim() : String(e)}`);
-        }
-      }
-    } catch (e) {
-      failures.push(`${branch}: ${e && e.message ? e.message.trim() : String(e)}`);
-    }
-    try { git(['worktree', 'prune'], root, true); } catch {}
+    const failures = removeWorktreeAndBranch(root, def, wt ? wt.path : null, branch);
     if (failures.length) vscode.window.showErrorMessage(`Worktree: delete failed — ${failures.join('; ')}`);
-    if (deletedCurrent) {
+    if (wt && path.resolve(wt.path) === open) {
       await vscode.commands.executeCommand('workbench.action.closeWindow');
       return 'window-closed';
     }
@@ -345,18 +373,74 @@ async function switchBranch() {
     }
   }
 
-  // - Run the configured `worktreeSwitch.setupWorktreeCommand` command for a freshly created
-  //   worktree (per-repo setup like skills-tree linking, installs, etc.)
-
-  // - If setup fails, leave the worktree unopened so the failure is unmistakable
-  //   (the error is already surfaced). The worktree still exists; the next switch
-  //   to this branch reuses it and opens without re-running setup.
-  if (created && !(await runSetupWorktree(root, target, picked))) return;
+  // - Run the configured `worktreeSwitch.setupWorktreeCommand` for a freshly created
+  //   worktree (per-repo setup like installs, venv sync, etc.), then react to the
+  //   outcome:
+  //   - 'cancelled': the user stopped it — roll the worktree back so nothing
+  //     half-prepared is left behind.
+  //   - 'failed': leave the worktree in place (the error is already surfaced) so it
+  //     can be inspected; the next switch reuses it without re-running setup.
+  //   Either way, don't open the window.
+  if (created) {
+    const status = await runSetupWorktree(root, target, picked);
+    if (status === 'cancelled') {
+      try { git(['worktree', 'remove', '--force', target], root, true); } catch {}
+      try { git(['worktree', 'prune'], root, true); } catch {}
+      return;
+    }
+    if (status !== 'ok') return;
+  }
 
   // - Open the worktree. A freshly created worktree opens in a NEW window (so the
   //   current one stays put); switching to an existing worktree reuses this window.
 
   await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(target), { forceNewWindow: created });
+}
+
+// - "Worktree: Remove" — pick a worktree to delete (its folder + branch). Lists all
+//   worktrees except the main repo; the one open in this window is pinned to the top
+//   and marked "current". Removes on selection, and closes the window if the removed
+//   worktree was the open one.
+
+async function removeWorktree() {
+  const repo = resolveRepo();
+  if (!repo) return;
+  const { root, def, open } = repo;
+
+  const entries = listWorktrees(root).filter((e) => !e.bare && path.resolve(e.path) !== path.resolve(root));
+  if (!entries.length) {
+    vscode.window.showInformationMessage('Worktree: no worktrees to remove.');
+    return;
+  }
+
+  const items = entries
+    .map((e) => {
+      const isCurrent = path.resolve(e.path) === open;
+      return {
+        label: e.branch || '(detached)',
+        description: isCurrent ? '$(check) current window' : '$(folder) worktree',
+        detail: e.path,
+        entry: e,
+        isCurrent,
+      };
+    })
+    .sort((a, b) => Number(b.isCurrent) - Number(a.isCurrent)); // open worktree first
+
+  const pick = await vscode.window.showQuickPick(items, {
+    title: 'Worktree: Remove',
+    placeHolder: 'Select a worktree to remove (deletes the folder and its branch)',
+    matchOnDetail: true,
+  });
+  if (!pick) return;
+
+  const branch = pick.entry.branch;
+  const failures = removeWorktreeAndBranch(root, def, pick.entry.path, branch);
+  if (failures.length) {
+    vscode.window.showErrorMessage(`Worktree: remove failed — ${failures.join('; ')}`);
+  } else {
+    vscode.window.showInformationMessage(`Removed worktree "${pick.label}".`);
+  }
+  if (pick.isCurrent) await vscode.commands.executeCommand('workbench.action.closeWindow');
 }
 
 // - Parse `git worktree list --porcelain` into { path, branch?, bare?, detached? }.
@@ -375,7 +459,10 @@ function listWorktrees(root) {
 }
 
 function activate(context) {
-  context.subscriptions.push(vscode.commands.registerCommand('worktreeSwitch.switch', switchBranch));
+  context.subscriptions.push(
+    vscode.commands.registerCommand('worktreeSwitch.switch', switchBranch),
+    vscode.commands.registerCommand('worktreeSwitch.remove', removeWorktree),
+  );
 }
 
 function deactivate() {}
