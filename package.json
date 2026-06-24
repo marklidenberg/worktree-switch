@@ -24,7 +24,7 @@
     "configuration": {
       "title": "Worktree Switch",
       "properties": {
-        "worktreeSwitch.setup": {
+        "worktreeSwitch.setupWorktreeCommand": {
           "type": "string",
           "default": "",
           "scope": "resource",

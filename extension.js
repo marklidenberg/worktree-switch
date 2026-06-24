@@ -19,7 +19,7 @@ function refExists(ref, cwd) {
   }
 }
 
-// - Per-repo setup for a freshly created worktree. The `worktreeSwitch.setup`
+// - Per-repo setup for a freshly created worktree. The `worktreeSwitch.setupWorktreeCommand`
 //   setting holds a shell command (e.g. `yarn install`, or `bash dev/setup.sh`,
 //   chained with `&&`); when set, it runs inside the new worktree to do per-repo
 //   prep (installs, husky, venv sync, link skills-tree). Output streams live to the
@@ -35,7 +35,7 @@ function getOutput() {
 }
 
 function runSetupWorktree(root, target, branch) {
-  const setup = (vscode.workspace.getConfiguration('worktreeSwitch', vscode.Uri.file(target)).get('setup') || '').trim();
+  const setup = (vscode.workspace.getConfiguration('worktreeSwitch', vscode.Uri.file(target)).get('setupWorktreeCommand') || '').trim();
   if (!setup) return Promise.resolve(true);
 
   const out = getOutput();
@@ -345,7 +345,7 @@ async function switchBranch() {
     }
   }
 
-  // - Run the configured `worktreeSwitch.setup` command for a freshly created
+  // - Run the configured `worktreeSwitch.setupWorktreeCommand` command for a freshly created
   //   worktree (per-repo setup like skills-tree linking, installs, etc.)
 
   // - If setup fails, leave the worktree unopened so the failure is unmistakable

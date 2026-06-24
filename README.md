@@ -20,11 +20,11 @@ The default branch (usually `main`) opens the repo itself. Any other branch open
 
 ## Setup per worktree
 
-Point `worktreeSwitch.setup` at a command that runs in each new worktree before its window opens. Put it in the repo's `.vscode/settings.json` to share it with everyone:
+Point `worktreeSwitch.setupWorktreeCommand` at a command that runs in each new worktree before its window opens. Put it in the repo's `.vscode/settings.json` to share it with everyone:
 
 ```jsonc
 {
-  "worktreeSwitch.setup": "yarn install && bash dev/setup.sh"
+  "worktreeSwitch.setupWorktreeCommand": "yarn install && bash dev/setup.sh"
 }
 ```
 
