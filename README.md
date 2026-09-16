@@ -35,3 +35,7 @@ Empty by default. It runs in your shell with these variables set:
 - `$WORKTREE_PATH` — worktree path
 - `$WORKTREE_MAIN` — original repo root
 - `$WORKTREE_BRANCH` — branch name
+
+This is my edit 
+
+pupupu
