@@ -38,4 +38,6 @@ Empty by default. It runs in your shell with these variables set:
 
 This is my edit 
 
+edit 1
+
 pupupu
